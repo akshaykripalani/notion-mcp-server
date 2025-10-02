@@ -50,6 +50,20 @@ export class MCPProxy {
     this.tools = tools
     this.openApiLookup = openApiLookup
 
+    // Restrict exposed tools to a specific allowlist
+    const allowedMethods = new Set(['patch-block-children'])
+    const apiTools = this.tools['API']
+    if (apiTools) {
+      apiTools.methods = apiTools.methods.filter(m => allowedMethods.has(m.name))
+    }
+    this.openApiLookup = Object.fromEntries(
+      Object.entries(this.openApiLookup).filter(([key]) => {
+        // Keys are in the form 'API-<methodName>'
+        const methodName = key.startsWith('API-') ? key.slice(4) : key
+        return allowedMethods.has(methodName)
+      })
+    ) as typeof this.openApiLookup
+
     this.setupHandlers()
   }
 
