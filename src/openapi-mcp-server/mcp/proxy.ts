@@ -163,7 +163,7 @@ export class MCPProxy {
     // 1. Get Page Title
     const retrievePageOp = this.findOperation('API-retrieve-a-page')
     if (!retrievePageOp) throw new Error('Operation retrieve-a-page not found')
-    
+
     const pageResponse = await this.httpClient.executeOperation(retrievePageOp, { page_id: pageId })
     const title = this.extractPageTitle(pageResponse.data)
 
@@ -194,7 +194,8 @@ export class MCPProxy {
     const patchChildrenOp = this.findOperation('API-patch-block-children')
     if (!patchChildrenOp) throw new Error('Operation patch-block-children not found')
 
-    const body = {
+    const response = await this.httpClient.executeOperation(patchChildrenOp, {
+      block_id: pageId,
       children: [
         {
           object: 'block',
@@ -210,11 +211,9 @@ export class MCPProxy {
             ],
           },
         },
-      ],
-    }
+      ]
+    })
 
-    const response = await this.httpClient.executeOperation(patchChildrenOp, { block_id: pageId, body })
-    
     // Extract the ID of the new block (it's in results[0])
     const newBlockId = response.data.results?.[0]?.id
 
@@ -232,8 +231,20 @@ export class MCPProxy {
     const updateBlockOp = this.findOperation('API-update-a-block')
     if (!updateBlockOp) throw new Error('Operation update-a-block not found')
 
-    const body = {
-      paragraph: {
+    // 1. Fetch the block to get its type
+    const retrieveBlockOp = this.findOperation('API-retrieve-a-block')
+    if (!retrieveBlockOp) throw new Error('Operation retrieve-a-block not found')
+
+    const blockResponse = await this.httpClient.executeOperation(retrieveBlockOp, { block_id: params.block_id })
+    const blockType = blockResponse.data.type
+
+    if (!blockResponse.data[blockType]?.rich_text) {
+      throw new Error(`Block type '${blockType}' does not support text updates via this tool.`)
+    }
+
+    // 2. Update the block using the correct type property
+    const updateBody = {
+      [blockType]: {
         rich_text: [
           {
             type: 'text',
@@ -245,7 +256,7 @@ export class MCPProxy {
       },
     }
 
-    const response = await this.httpClient.executeOperation(updateBlockOp, { block_id: params.block_id, body })
+    const response = await this.httpClient.executeOperation(updateBlockOp, { block_id: params.block_id, ...updateBody })
 
     return {
       content: [
@@ -293,7 +304,7 @@ export class MCPProxy {
     // But it depends on the property name (usually "title" or "Name")
     // We'll try to find a property of type "title"
     if (!pageData.properties) return 'Untitled'
-    
+
     for (const prop of Object.values(pageData.properties) as any[]) {
       if (prop.type === 'title' && Array.isArray(prop.title)) {
         return prop.title.map((t: any) => t.plain_text).join('')
@@ -304,14 +315,14 @@ export class MCPProxy {
 
   private extractBlocks(childrenData: any): any[] {
     if (!childrenData.results || !Array.isArray(childrenData.results)) return []
-    
+
     return childrenData.results.map((block: any) => {
       let text = ''
-      if (block.type === 'paragraph' && block.paragraph?.rich_text) {
-        text = block.paragraph.rich_text.map((t: any) => t.plain_text).join('')
+      const type = block.type
+      if (block[type]?.rich_text) {
+        text = block[type].rich_text.map((t: any) => t.plain_text).join('')
       }
-      // Add other block types if needed, for now just paragraph text
-      
+
       return {
         id: block.id,
         type: block.type,
