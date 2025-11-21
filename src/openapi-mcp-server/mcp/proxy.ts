@@ -117,9 +117,9 @@ export class MCPProxy {
           case 'read_page':
             return await this.handleReadPage()
           case 'append_block':
-            return await this.handleAppendBlock(params as { text: string })
+            return await this.handleAppendBlock(params as { text: string; user_name?: string })
           case 'update_block':
-            return await this.handleUpdateBlock(params as { block_id: string; text: string })
+            return await this.handleUpdateBlock(params as { block_id: string; text: string; user_name?: string })
           case 'delete_block':
             return await this.handleDeleteBlock(params as { block_id: string })
           default:
@@ -187,9 +187,15 @@ export class MCPProxy {
     }
   }
 
-  private async handleAppendBlock(params: { text: string }) {
+  private async handleAppendBlock(params: { text: string; user_name?: string }) {
     const pageId = process.env.NOTION_PAGE_ID
     if (!pageId) throw new Error('NOTION_PAGE_ID is not set')
+
+    let textContent = params.text
+    if (params.user_name) {
+      const timeInIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+      textContent += `\n\nAction performed by ${params.user_name} at ${timeInIST}`
+    }
 
     const patchChildrenOp = this.findOperation('API-patch-block-children')
     if (!patchChildrenOp) throw new Error('Operation patch-block-children not found')
@@ -205,7 +211,7 @@ export class MCPProxy {
               {
                 type: 'text',
                 text: {
-                  content: params.text,
+                  content: textContent,
                 },
               },
             ],
@@ -227,9 +233,15 @@ export class MCPProxy {
     }
   }
 
-  private async handleUpdateBlock(params: { block_id: string; text: string }) {
+  private async handleUpdateBlock(params: { block_id: string; text: string; user_name?: string }) {
     const updateBlockOp = this.findOperation('API-update-a-block')
     if (!updateBlockOp) throw new Error('Operation update-a-block not found')
+
+    let textContent = params.text
+    if (params.user_name) {
+      const timeInIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+      textContent += `\n\nAction performed by ${params.user_name} at ${timeInIST}`
+    }
 
     // 1. Fetch the block to get its type
     const retrieveBlockOp = this.findOperation('API-retrieve-a-block')
@@ -249,7 +261,7 @@ export class MCPProxy {
           {
             type: 'text',
             text: {
-              content: params.text,
+              content: textContent,
             },
           },
         ],
