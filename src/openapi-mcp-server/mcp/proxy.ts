@@ -77,6 +77,7 @@ export class MCPProxy {
               type: 'object',
               properties: {
                 text: { type: 'string', description: 'The text content of the new block' },
+                user_name: { type: 'string', description: 'The name of the user performing the action. This is automatically added, so please do not add this parameter.' },
               },
               required: ['text'],
             },
@@ -89,6 +90,7 @@ export class MCPProxy {
               properties: {
                 block_id: { type: 'string', description: 'The ID of the block to update' },
                 text: { type: 'string', description: 'The new text content' },
+                user_name: { type: 'string', description: 'The name of the user performing the action. This is automatically added, so please do not add this parameter.' },
               },
               required: ['block_id', 'text'],
             },
@@ -192,6 +194,7 @@ export class MCPProxy {
     if (!pageId) throw new Error('NOTION_PAGE_ID is not set')
 
     let textContent = params.text
+
     if (params.user_name) {
       const timeInIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
       textContent += `\n\nAction performed by ${params.user_name} at ${timeInIST}`
@@ -238,6 +241,7 @@ export class MCPProxy {
     if (!updateBlockOp) throw new Error('Operation update-a-block not found')
 
     let textContent = params.text
+
     if (params.user_name) {
       const timeInIST = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
       textContent += `\n\nAction performed by ${params.user_name} at ${timeInIST}`
