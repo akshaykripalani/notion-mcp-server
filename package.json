@@ -1,12 +1,12 @@
 {
-  "name": "@notionhq/notion-mcp-server",
+  "name": "@akshaykripalani/notion-mcp-server",
   "keywords": [
     "notion",
     "api",
     "mcp",
     "server"
   ],
-  "version": "1.9.0",
+  "version": "1.0.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -46,15 +46,15 @@
     "typescript": "^5.8.2",
     "vitest": "^3.1.1"
   },
-  "description": "Official MCP server for Notion API",
+  "description": "Custom Stripped down Notion MCP server for MCP use.",
   "main": "index.js",
   "repository": {
     "type": "git",
-    "url": "git@github.com:makenotion/notion-mcp-server.git"
+    "url": "git@github.com:akshaykripalani/notion-mcp-server.git"
   },
   "author": "@notionhq",
   "bugs": {
-    "url": "https://github.com/makenotion/notion-mcp-server/issues"
+    "url": "https://github.com/akshaykripalani/notion-mcp-server/issues"
   },
-  "homepage": "https://github.com/makenotion/notion-mcp-server#readme"
+  "homepage": "https://github.com/akshaykripalani/notion-mcp-server#readme"
 }

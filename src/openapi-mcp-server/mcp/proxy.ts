@@ -27,7 +27,6 @@ type NewToolDefinition = {
 export class MCPProxy {
   private server: Server
   private httpClient: HttpClient
-  private tools: Record<string, NewToolDefinition>
   private openApiLookup: Record<string, OpenAPIV3.OperationObject & { method: string; path: string }>
 
   constructor(name: string, openApiSpec: OpenAPIV3.Document) {
@@ -44,25 +43,16 @@ export class MCPProxy {
       openApiSpec,
     )
 
-    // Convert OpenAPI spec to MCP tools
+    // Convert OpenAPI spec to MCP tools to get the lookup map
+    // We won't use the generated tools directly, but we need the lookup to execute operations
     const converter = new OpenAPIToMCPConverter(openApiSpec)
-    const { tools, openApiLookup } = converter.convertToMCPTools()
-    this.tools = tools
+    const { openApiLookup } = converter.convertToMCPTools()
     this.openApiLookup = openApiLookup
 
-    // Restrict exposed tools to a specific allowlist
-    const allowedMethods = new Set(['patch-block-children'])
-    const apiTools = this.tools['API']
-    if (apiTools) {
-      apiTools.methods = apiTools.methods.filter(m => allowedMethods.has(m.name))
+    // Check for required environment variable
+    if (!process.env.NOTION_PAGE_ID) {
+      console.warn('WARNING: NOTION_PAGE_ID environment variable is not set. read_page and append_block tools will fail.')
     }
-    this.openApiLookup = Object.fromEntries(
-      Object.entries(this.openApiLookup).filter(([key]) => {
-        // Keys are in the form 'API-<methodName>'
-        const methodName = key.startsWith('API-') ? key.slice(4) : key
-        return allowedMethods.has(methodName)
-      })
-    ) as typeof this.openApiLookup
 
     this.setupHandlers()
   }
@@ -70,67 +60,217 @@ export class MCPProxy {
   private setupHandlers() {
     // Handle tool listing
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const tools: Tool[] = []
-
-      // Add methods as separate tools to match the MCP format
-      Object.entries(this.tools).forEach(([toolName, def]) => {
-        def.methods.forEach(method => {
-          const toolNameWithMethod = `${toolName}-${method.name}`;
-          const truncatedToolName = this.truncateToolName(toolNameWithMethod);
-          tools.push({
-            name: truncatedToolName,
-            description: method.description,
-            inputSchema: method.inputSchema as Tool['inputSchema'],
-          })
-        })
-      })
-
-      return { tools }
+      return {
+        tools: [
+          {
+            name: 'read_page',
+            description: 'Read the title and blocks of the configured Notion page.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+            },
+          },
+          {
+            name: 'append_block',
+            description: 'Append a new text paragraph to the configured Notion page.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                text: { type: 'string', description: 'The text content of the new block' },
+              },
+              required: ['text'],
+            },
+          },
+          {
+            name: 'update_block',
+            description: 'Update the text of an existing block.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                block_id: { type: 'string', description: 'The ID of the block to update' },
+                text: { type: 'string', description: 'The new text content' },
+              },
+              required: ['block_id', 'text'],
+            },
+          },
+          {
+            name: 'delete_block',
+            description: 'Delete (archive) a block.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                block_id: { type: 'string', description: 'The ID of the block to delete' },
+              },
+              required: ['block_id'],
+            },
+          },
+        ],
+      }
     })
 
     // Handle tool calling
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: params } = request.params
 
-      // Find the operation in OpenAPI spec
-      const operation = this.findOperation(name)
-      if (!operation) {
-        throw new Error(`Method ${name} not found`)
-      }
-
       try {
-        // Execute the operation
-        const response = await this.httpClient.executeOperation(operation, params)
-
-        // Convert response to MCP format
-        return {
-          content: [
-            {
-              type: 'text', // currently this is the only type that seems to be used by mcp server
-              text: JSON.stringify(response.data), // TODO: pass through the http status code text?
-            },
-          ],
+        switch (name) {
+          case 'read_page':
+            return await this.handleReadPage()
+          case 'append_block':
+            return await this.handleAppendBlock(params as { text: string })
+          case 'update_block':
+            return await this.handleUpdateBlock(params as { block_id: string; text: string })
+          case 'delete_block':
+            return await this.handleDeleteBlock(params as { block_id: string })
+          default:
+            throw new Error(`Unknown tool: ${name}`)
         }
       } catch (error) {
         console.error('Error in tool call', error)
         if (error instanceof HttpClientError) {
-          console.error('HttpClientError encountered, returning structured error', error)
           const data = error.data?.response?.data ?? error.data ?? {}
           return {
+            isError: true,
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  status: 'error', // TODO: get this from http status code?
-                  ...(typeof data === 'object' ? data : { data: data }),
+                  status: 'error',
+                  message: error.message,
+                  details: data,
                 }),
               },
             ],
           }
         }
-        throw error
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        }
       }
     })
+  }
+
+  private async handleReadPage() {
+    const pageId = process.env.NOTION_PAGE_ID
+    if (!pageId) throw new Error('NOTION_PAGE_ID is not set')
+
+    // 1. Get Page Title
+    const retrievePageOp = this.findOperation('API-retrieve-a-page')
+    if (!retrievePageOp) throw new Error('Operation retrieve-a-page not found')
+    
+    const pageResponse = await this.httpClient.executeOperation(retrievePageOp, { page_id: pageId })
+    const title = this.extractPageTitle(pageResponse.data)
+
+    // 2. Get Block Children
+    const getChildrenOp = this.findOperation('API-get-block-children')
+    if (!getChildrenOp) throw new Error('Operation get-block-children not found')
+
+    const childrenResponse = await this.httpClient.executeOperation(getChildrenOp, { block_id: pageId })
+    const blocks = this.extractBlocks(childrenResponse.data)
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            title,
+            blocks,
+          }, null, 2),
+        },
+      ],
+    }
+  }
+
+  private async handleAppendBlock(params: { text: string }) {
+    const pageId = process.env.NOTION_PAGE_ID
+    if (!pageId) throw new Error('NOTION_PAGE_ID is not set')
+
+    const patchChildrenOp = this.findOperation('API-patch-block-children')
+    if (!patchChildrenOp) throw new Error('Operation patch-block-children not found')
+
+    const body = {
+      children: [
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              {
+                type: 'text',
+                text: {
+                  content: params.text,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }
+
+    const response = await this.httpClient.executeOperation(patchChildrenOp, { block_id: pageId, body })
+    
+    // Extract the ID of the new block (it's in results[0])
+    const newBlockId = response.data.results?.[0]?.id
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ block_id: newBlockId }),
+        },
+      ],
+    }
+  }
+
+  private async handleUpdateBlock(params: { block_id: string; text: string }) {
+    const updateBlockOp = this.findOperation('API-update-a-block')
+    if (!updateBlockOp) throw new Error('Operation update-a-block not found')
+
+    const body = {
+      paragraph: {
+        rich_text: [
+          {
+            type: 'text',
+            text: {
+              content: params.text,
+            },
+          },
+        ],
+      },
+    }
+
+    const response = await this.httpClient.executeOperation(updateBlockOp, { block_id: params.block_id, body })
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response.data),
+        },
+      ],
+    }
+  }
+
+  private async handleDeleteBlock(params: { block_id: string }) {
+    const deleteBlockOp = this.findOperation('API-delete-a-block')
+    if (!deleteBlockOp) throw new Error('Operation delete-a-block not found')
+
+    const response = await this.httpClient.executeOperation(deleteBlockOp, { block_id: params.block_id })
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response.data),
+        },
+      ],
+    }
   }
 
   private findOperation(operationId: string): (OpenAPIV3.OperationObject & { method: string; path: string }) | null {
@@ -138,25 +278,6 @@ export class MCPProxy {
   }
 
   private parseHeadersFromEnv(): Record<string, string> {
-    // First try OPENAPI_MCP_HEADERS (existing behavior)
-    const headersJson = process.env.OPENAPI_MCP_HEADERS
-    if (headersJson) {
-      try {
-        const headers = JSON.parse(headersJson)
-        if (typeof headers !== 'object' || headers === null) {
-          console.warn('OPENAPI_MCP_HEADERS environment variable must be a JSON object, got:', typeof headers)
-        } else if (Object.keys(headers).length > 0) {
-          // Only use OPENAPI_MCP_HEADERS if it contains actual headers
-          return headers
-        }
-        // If OPENAPI_MCP_HEADERS is empty object, fall through to try NOTION_TOKEN
-      } catch (error) {
-        console.warn('Failed to parse OPENAPI_MCP_HEADERS environment variable:', error)
-        // Fall through to try NOTION_TOKEN
-      }
-    }
-
-    // Alternative: try NOTION_TOKEN
     const notionToken = process.env.NOTION_TOKEN
     if (notionToken) {
       return {
@@ -164,31 +285,42 @@ export class MCPProxy {
         'Notion-Version': '2022-06-28'
       }
     }
-
     return {}
   }
 
-  private getContentType(headers: Headers): 'text' | 'image' | 'binary' {
-    const contentType = headers.get('content-type')
-    if (!contentType) return 'binary'
-
-    if (contentType.includes('text') || contentType.includes('json')) {
-      return 'text'
-    } else if (contentType.includes('image')) {
-      return 'image'
+  private extractPageTitle(pageData: any): string {
+    // Notion page title is usually in properties.title.title[0].plain_text
+    // But it depends on the property name (usually "title" or "Name")
+    // We'll try to find a property of type "title"
+    if (!pageData.properties) return 'Untitled'
+    
+    for (const prop of Object.values(pageData.properties) as any[]) {
+      if (prop.type === 'title' && Array.isArray(prop.title)) {
+        return prop.title.map((t: any) => t.plain_text).join('')
+      }
     }
-    return 'binary'
+    return 'Untitled'
   }
 
-  private truncateToolName(name: string): string {
-    if (name.length <= 64) {
-      return name;
-    }
-    return name.slice(0, 64);
+  private extractBlocks(childrenData: any): any[] {
+    if (!childrenData.results || !Array.isArray(childrenData.results)) return []
+    
+    return childrenData.results.map((block: any) => {
+      let text = ''
+      if (block.type === 'paragraph' && block.paragraph?.rich_text) {
+        text = block.paragraph.rich_text.map((t: any) => t.plain_text).join('')
+      }
+      // Add other block types if needed, for now just paragraph text
+      
+      return {
+        id: block.id,
+        type: block.type,
+        text,
+      }
+    })
   }
 
   async connect(transport: Transport) {
-    // The SDK will handle stdio communication
     await this.server.connect(transport)
   }
 
